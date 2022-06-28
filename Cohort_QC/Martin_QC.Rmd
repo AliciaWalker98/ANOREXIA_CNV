@@ -1,0 +1,546 @@
+---
+title: "Martin_QC"
+author: "Alicia Walker"
+date: '2022-06-28'
+output: html_document
+---
+
+
+# 1. Summary
+```{bash}
+#!/bin/bash
+#
+#SBATCH --job-name=summary
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+# Bulik
+plink2 --bfile $DATA --missing  --out Summary
+plink2 --bfile $DATA --freq     --out Summary
+plink2 --bfile $DATA --hardy    --out Summary
+```
+
+# 2. Plots
+export R_LIBS=/nfs/home/aliwal/rlib_plinkqc
+```{r}
+library(ggplot2)
+library(ggpubr)
+library(ggsignif)
+
+
+vmiss <- read.table("Summary.vmiss", col.names = c("CHROM", "ID", "MISSING_CT", "OBS_CT", "F_MISS"))
+smiss <- read.table("Summary.smiss", col.names=c("FID", "IID", "MISSING_CT", "OBS_CT", "F_MISS"))
+freq <- read.table("Summary.afreq", col.names=c("CHROM", "ID", "REF", "ALT", "ALT_FREQS", "OBS_CT"))
+hwe <- read.table("Summary.hardy", col.names=c("CHROM", "ID", "A1", "AX", "HOM_A1_CT", "HET_A1_CT", "TWO_AX_CT", "O(HET_A1)", "E(HET_A1)", "P"))
+
+png("Martin_Summary.png", width=18, height=18, units='in', bg="white", res=150, type=c("cairo"))
+par(mfrow=c(2,2))
+hist(1-vmiss$F_MISS, breaks="sturges",main="SNPs",col="tan", xlab="Genotyping Rate", ylab="Number of SNPs", labels=T, cex.lab = 2, cex.axis =2, cex.main =2)
+hist(1-smiss$F_MISS, breaks="sturges", main="Individuals", col="tan", xlab="Genotyping Rate", ylab="Number of Individuals", cex.lab = 2, cex.axis =2, cex.main =2)
+hist(hwe$P, breaks="sturges", main="HWE P-Value", col="tan", xlab="HWE P-value", ylab="Number of SNPs", cex.lab = 2, cex.axis =2, cex.main =2)
+hist(freq$ALT_FREQS, breaks="sturges", main="MAF", col="tan", xlab="MAF", ylab="Number of SNPs", cex.lab = 2, cex.axis =2, cex.main =2)
+dev.off()
+```
+
+# 3. SNP Missingness
+Remove SNPs with high missing rate (> 10%, which reflects poor performance of the SNP probe).
+```{bash}
+
+#!/bin/bash
+#SBATCH --job-name=geno-missingness
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+plink2 --bfile $DATA --geno 0.1 --make-bed --out ${DATA}_cleaned1
+
+```
+
+grep removed *_cleaned1.log | grep missing
+
+--geno: 3189 variants removed due to missing genotype data.
+
+# 4.  Remove SNPS that violate HEW
+HWE test threshold is set at 0.000001.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=hwe
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+plink2 --bfile ${DATA}_cleaned1 --hwe 0.000001 --make-bed --out ${DATA}_cleaned2
+```
+
+grep removed *_cleaned2.log | grep hwe
+
+--hwe: 1986 variants removed due to Hardy-Weinberg exact test (founders only).
+
+# 5. Remove rare variants
+MAF threshold is set at 0.01. The SNPs outside of chromosomes 1-23 are also removed in this step.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=maf
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+plink2 --bfile ${DATA}_cleaned2 --maf 0.01  --chr 1-23 --make-bed --out ${DATA}_cleaned3
+```
+
+grep removed *_cleaned3.log | grep ' allele frequency threshold'
+114519 variants removed due to allele frequency threshold(s)
+
+# 6. Remove individuals with missing genotyping data
+
+Remove individuals with high missing rate (> 10%, which reflects poor DNA quality)
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=missingness
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+plink2 --bfile ${DATA}_cleaned3 --mind 0.1 --make-bed --out ${DATA}_cleaned4
+```
+
+grep removed *_cleaned4.log | grep missing
+
+# 7. Add Gender to the fam file
+
+First add sex to the .fam file
+```{r}
+library(dplyr)
+martin.s <- read.csv("/nfs/home/aliwal/ANGI/data/sample_sheets/sample_angi_martin_20190429.tsv", sep = "\t")
+martin.s <-martin.s[,c("entity.sample_id", "autocall_gender","collaborator_participant_id")]
+martin.p <- read.csv("/nfs/home/aliwal/ANGI/data/sample_sheets/participant_angi_martin_20190429.tsv", sep = "\t")
+martin <- merge(martin.s, martin.p, by = "collaborator_participant_id")
+martin <- martin %>% select(entity.sample_id, entity.participant_id, autocall_gender, reported_gender)
+martin$batch <- "Martin"
+martin$Sample_ID <-paste0(sapply(strsplit(as.character(martin$entity.sample_id), "_"), "[[", 1), "_",sapply(strsplit(as.character(martin$entity.sample_id), "_"), "[[", 2))
+write.table(martin, "/nfs/home/aliwal/ANGI/data/sample_sheets/Martin_Samples.csv", col.names = T, row.names = F, sep = ",", quote=F)
+
+fam <- read.table("/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515_cleaned4.fam", col.names = c("FID", "IID", "X", "X2", "Sex", "Phenotype"))
+fam$Sex <- martin$reported_gender[match(fam$IID, martin$Sample_ID)]
+fam$Sex <- as.vector(ifelse(fam$Sex == "F", 2, 1))
+write.table(fam, "/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515_cleaned_wsex.fam", col.names = F, row.names = F, sep = "\t", quote=F)
+```
+
+```{bash}
+cp PGCED_SE_ANGI_Martin_v1_3_190515_cleaned4.bed PGCED_SE_ANGI_Martin_v1_3_190515_cleaned_wsex.bed
+cp PGCED_SE_ANGI_Martin_v1_3_190515_cleaned4.bim PGCED_SE_ANGI_Martin_v1_3_190515_cleaned_wsex.bim
+```
+
+# 8. Remove HH SNPS
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=remove-hh
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+plink --bfile ${DATA}_cleaned_wsex --set-hh-missing --make-bed --out ${DATA}_noHH
+```
+
+```{bash}
+cat PGCED_SE_ANGI_Martin_v1_3_190515_noHH.hh | awk -v OFS='\t' '{print $3}'  | uniq > unique_HH.txt
+```
+
+
+# 9. Sex Concordance
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=sex_concordance
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+plink --bfile  ${DATA}_noHH  --check-sex --out SexCheck
+
+```
+
+grep -v OK SexCheck.sexcheck
+                 FID                   IID       PEDSEX       SNPSEX       STATUS            F
+  201035700167_R02C02   201035700167_R02C02            2            0      PROBLEM        0.474
+  201096140126_R09C02   201096140126_R09C02            2            0      PROBLEM        0.769
+  201035690089_R02C02   201035690089_R02C02            2            0      PROBLEM       0.2032
+  201035690189_R01C02   201035690189_R01C02            2            0      PROBLEM       0.3921
+
+
+Remove 
+201035700167_R02C02   201035700167_R02C02
+201096140126_R09C02   201096140126_R09C02
+201035690189_R01C02   201035690189_R01C02
+
+# 10. Remove the sample mix up
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=remove-sample
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+remove=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/remove.txt
+
+plink --bfile  ${DATA}_noHH  --remove ${remove} --make-bed --out ${DATA}_cleaned5
+```
+
+
+# 11. Flip the strand
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=flip-strand
+#SBATCH --mem=20GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+SOFTWARE=/nfs/home/aliwal/software
+
+${SOFTWARE}/update_build.sh  ${DATA}_cleaned5  ${SOFTWARE}/GSA-24v1-0_A1-b37.Source.strand   ${DATA}_flipped
+```
+
+
+# 12. updated the ILLUMINA SNP IDs to the IDs in reference genome GRCh37.p5
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=add_rs_ids
+#SBATCH --mem=20GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+SOFTWARE=/nfs/home/aliwal/software
+
+Rscript ${SOFTWARE}/SNP_to_rsID.R  ${DATA}_flipped.bim
+mv ${DATA}_flipped.bim ${DATA}_flipped.bim_ori
+mv ${DATA}_flipped.bim_rsed_dbSNP144.GRCh37 ${DATA}_flipped.bim
+```
+
+## Heterozygosity check!!
+The inbreeding coefficient is also the fraction of all of the genes of an animal that are homozygous (two copies of the same allele). A COI of less than 5% is best. 
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=het
+#SBATCH --mem=20GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+plink --bfile ${DATA}_flipped --het
+```
+
+```{r}
+het <- read.table("plink.het", header = T)
+library(ggplot2)
+library(dplyr)
+het_05 <- het %>% filter(F > 0.05)
+num_outliers <- dim(het_05)[1]
+num_outliers
+
+png("Martin_het_F.png", width=15, height=18, units='in', bg="white", res=150, type=c("cairo"))
+ggplot(het, aes(x = F)) + geom_histogram()
+dev.off()
+```
+
+
+# 13. Check AF to reference
+
+## VECTOR
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=AF
+#SBATCH --mem=20GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+path2out=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515
+plink --bfile ${DATA}_flipped \
+          --freq \
+          --out ${path2out}/freq_Martin
+```
+
+## DELTA
+### Copy AF of data across to Delta
+```{bash}
+#!/bin/bash
+# 
+#PBS -S /bin/bash
+#PBS -A UQ-IMB
+#PNS -N plink_allele_freq
+#PBS -l walltime=2:00:00
+#PBS -l select=1:ncpus=1:mem=30GB
+
+DATA=/scratch/90days/uqawal15/1000G_phase3
+path2software=/scratch/90days/uqawal15/software
+${path2software}/plink --bfile ${DATA}/1000G_phase3_20130502_combined_snpsonly.05 \
+          --freq \
+          --out ${DATA}/freq_1000G
+```
+
+```{bash}
+library(data.table)
+dat = data.frame(fread("/scratch/90days/uqawal15/1000G_phase3/Martin/freq_Martin.frq", header = T, showProgress = F))
+KG = data.frame(fread("/scratch/90days/uqawal15/1000G_phase3/freq_1000G.frq", header = T, showProgress = F))
+comm <- intersect(dat$SNP, KG$SNP)
+dat = dat[dat$SNP %in%comm,]
+KG = KG[KG$SNP %in%comm,]
+
+# check allele frequency
+dat$KG.maf = KG[match(dat$SNP, KG$SNP),"MAF"]
+dat$KG.allele =  KG[match(dat$SNP, KG$SNP),"A1"]
+
+dat$KG.ref = NA
+dat[which(dat$A1 == dat$KG.allele), ]$KG.ref = dat[which(dat$A1 == dat$KG.allele) , "KG.maf" ]
+dat[which(dat$A2 == dat$KG.allele), ]$KG.ref = (1 - dat[which(dat$A2 == dat$KG.allele) , "KG.maf" ])
+
+
+dat$diff = NA
+dat$diff <- dat$MAF - dat$KG.maf
+
+t = 3
+SD0.1 = sd(dat[(dat$KG.maf > 0.09 & dat$KG.maf < 0.11),"diff"]) 
+SD0.5 = sd(dat[(dat$KG.maf > 0.49 & dat$KG.maf < 0.51),"diff"])
+a = t * (SD0.1 - SD0.5) / 0.16
+b = t * SD0.5
+fun.up1 =function(x)( x + a*(x-0.5)^2 + b )
+fun.dn1 =function(x)( x - a*(x-0.5)^2 - b )
+
+## outliers are outside of the red curves.
+dat$outlier = ((dat$diff)^2 > (a*((dat$KG.maf - 0.5)^2) + b )^2)
+nrow(dat[dat$outlier == T,])
+dat2 <- dat[!is.na(dat$KG.ref),]
+## write.table(raf[raf$outlier ==T,],"outlier.in.round1.txt", quote = F, sep ="\t")
+
+## plot
+library(ggplot2)
+png("Pedersen_1KG_AF.png", width=15, height=15, units='in', bg="white", res=150, type=c("cairo"))
+ggplot(dat2, aes(x=KG.ref, y =MAF)) + 
+  geom_point(size=0.5) + 
+  stat_function(fun = fun.up1, color = "red") + 
+  stat_function(fun = fun.dn1, color = "red") + 
+  xlim(0,1) + 
+  ylim(0,1)  +  
+  geom_abline(intercept=0, slope=1, color="blue") + 
+  ggtitle(paste0(t , " times of SD"))
+dev.off()
+
+## write table of non-outliers and SNPs that match by alleles
+dat3 <- dat2[dat2$outlier == F,]
+write.table(dat3,"non-outliers.txt", quote = F, sep ="\t", col.names = F, row.names =F)
+```
+
+
+# 12. Ancestry Analyses
+## DELTA2
+```{bash}
+cat non-outliers.txt | awk '{print $2}' > non-outliers.snps
+
+pcref='/scratch/90days/uqawal15/1000G_phase3/1000G_phase3_20130502_combined_snpsonly'
+refout='/scratch/90days/uqawal15/1000G_phase3/Martin/1000G_phase3_20130502_combined_snpsonly'
+
+### generate GRM
+/scratch/90days/uqawal15/software/gcta_1.93.3beta2/gcta64 --bfile ${pcref}.05  --extract non-outliers.snps --make-grm --out ${refout}.05.non.outliers
+## Calculates PCAs
+/scratch/90days/uqawal15/software/gcta_1.93.3beta2/gcta64 --grm    ${refout}.05.non.outliers  --pca 3   --out  ${refout}.05.non.outliers.pca3
+## Calculates PC loading
+/scratch/90days/uqawal15/software/gcta_1.93.3beta2/gcta64 --bfile  ${pcref}.05  --extract  non-outliers.snps  --pc-loading  ${refout}.05.non.outliers.pca3  --out ${refout}.05.non.outliers.pca3.loading
+```
+
+
+## VECTOR
+## Transfer the SNP loadings (.pcl), non-outlier snp list, the reference eigenvector back to vector.
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=PCA
+#SBATCH --mem=20GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+pcref='/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/1000G_phase3_20130502_combined_snpsonly'
+
+gcta64  --bfile  ${DATA}_flipped  --extract  non-outliers.snps  --project-loading   ${pcref}.05.non.outliers.pca3.loading  3  --out  ${DATA}_cleaned.pca3
+```
+
+```{bash}
+## PCA plotting
+mkdir PCA
+STR=/nfs/home/aliwal/software/1000GP_Phase3.sample
+Rscript  /nfs/home/aliwal/software/PCA_ancestrycalling_meanSD.R  MARTIN    ${pcref}.05.non.outliers.pca3   ${DATA}_cleaned.pca3.proj.eigenvec    ${STR}
+
+```
+
+# Table of Samples in each Ancestry
+```{r}
+anc <- read.table("MARTIN_ancestry_assigned_with_meanSD_method.txt", header =T)
+```
+
+  AMR   EAS   EUR other   SAS
+   37    34  1943    17     7
+
+# Remove non-outliers
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=remove-sample
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+plink --bfile  ${DATA}_flipped  --extract non-outliers.snps --make-bed --out ${DATA}_final
+```
+
+# Relatedness of Samples
+
+Only keep European samples
+```{bash}
+cat MARTIN_ancestry_assigned_with_meanSD_method.txt | sed -e '1d' | awk -v OFS='\t' '{if ($7 == "EUR") print $1, $2}' > EUR_samples.txt
+```
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=eur
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+eur=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PCA/EUR_samples.txt
+
+plink --bfile ${DATA}_final --keep ${eur} --make-bed --out ${DATA}_EUR
+```
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=GRM
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+gcta64 --bfile  ${DATA}_EUR  --make-grm --out ${DATA}_EUR
+```
+
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=relatives_02
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+gcta64 --grm ${DATA}_EUR --grm-singleton 0.2 --out ${DATA}_EUR_relatedness_02
+
+```
+
+```{bash}
+#!/bin/bash
+#SBATCH --job-name=relatives_005
+#SBATCH --mem=2GB
+#SBATCH --nodes=1
+#SBATCH --time=0:30:00
+
+DATA=/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515/PGCED_SE_ANGI_Martin_v1_3_190515
+
+gcta64 --grm ${DATA}_EUR --grm-singleton 0.05 --out ${DATA}_EUR_relatedness_005
+
+```
+
+```{r}
+prefix="PGCED_SE_ANGI_Martin_v1_3_190515_EUR"
+ReadGRMBin=function(prefix, AllN=F, size=4){
+  sum_i=function(i){
+    return(sum(1:i))
+  }
+  BinFileName=paste(prefix,".grm.bin",sep="")
+  NFileName=paste(prefix,".grm.N.bin",sep="")
+  IDFileName=paste(prefix,".grm.id",sep="")
+  id = read.table(IDFileName)
+  n=dim(id)[1]
+  BinFile=file(BinFileName, "rb");
+  grm=readBin(BinFile, n=n*(n+1)/2, what=numeric(0), size=size)
+  NFile=file(NFileName, "rb");
+  if(AllN==T){
+    N=readBin(NFile, n=n*(n+1)/2, what=numeric(0), size=size)
+  }
+  else N=readBin(NFile, n=1, what=numeric(0), size=size)
+  i=sapply(1:n, sum_i)
+  return(list(diag=grm[i], off=grm[-i], id=id, N=N))
+}
+GRM = ReadGRMBin(prefix)
+
+png("Martin_EUR_GRM.png", width=15, height=18, units='in', bg="white", res=150, type=c("cairo"))
+hist(GRM$off, breaks = seq(-0.2, 1, 0.05), labels = T, main="Distribution of GRM lower triangle", xlab="relationship", cex.main=2, cex.lab=2, cex.axis=2)
+dev.off()
+
+off <- GRM$off
+off2 <- off[off<0.05]
+png("Martin_EUR_GRM_rm05.png", width=15, height=18, units='in', bg="white", res=150, type=c("cairo"))
+hist(off2, labels = T,  breaks = seq(-0.2, 0.06, 0.05), main="Distribution of GRM lower triangle < 0.05", xlab="relationship", cex.main=2, cex.lab=2, cex.axis=2)
+dev.off()
+
+
+off3 <- off[off>=0.05]
+png("Martin_EUR_GRM_greater_05.png", width=15, height=18, units='in', bg="white", res=150, type=c("cairo"))
+hist(off3, labels = T,  breaks = seq(0.05, 1, 0.05), main="Distribution of GRM lower triangle >= 0.05", xlab="relationship", cex.main=2, cex.lab=2, cex.axis=2)
+dev.off()
+```
+
+
+# add relatedness values, het value, and ancestry to extra pheno file. 
+
+```{bash}
+library(dplyr)
+het <- read.table("plink.het", header = T)
+het <- het %>% dplyr::select(FID, IID, F)
+
+
+anc <- read.table(paste0("/nfs/home/aliwal/ANGI/data/PLINK_GENO/PGCED_SE_ANGI_Martin_v1_3_190515", "/PCA/MARTIN_ancestry_assigned_with_meanSD_method.txt"), header = T)
+anc <- anc %>% select(FID, population)
+
+final <- merge(het, anc, by = "FID")
+
+fam_05 <- read.table("PGCED_SE_ANGI_Martin_v1_3_190515_EUR_relatedness_005.family.txt", header = F)
+related_05 <- unique(fam_05$V1, fam_05$V3)
+fam_2 <- read.table("PGCED_SE_ANGI_Martin_v1_3_190515_EUR_relatedness_02.family.txt", header = F)
+related_2 <- unique(fam_2$V1, fam_2$V3)
+
+final$related_05 <- as.vector(ifelse(final$population =="EUR" & final$FID %in% related_05, 1, 0))
+final$related_2 <- as.vector(ifelse(final$population =="EUR" & final$FID %in% related_2, 1, 0))
+
+
+write.table(final,"final.pheno", quote = F, sep ="\t", col.names = T, row.names =F)
+```
+
+# Move Qced files
+```{bash}
+mkdir final
+mv final.pheno final
+mv PGCED_SE_ANGI_Martin_v1_3_190515_final* final
+mv PGCED_SE_ANGI_Martin_v1_3_190515_noHH.hh final
+```
+
